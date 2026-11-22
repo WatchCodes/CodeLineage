@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "watchcodes-codelineage"
+version = "0.1.0"
+description = "CodeLineage: source-to-destination identity and ownership verification records."
+requires-python = ">=3.11"
+dependencies = ["jsonschema>=4.21,<5"]
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9"]
+[tool.setuptools]
+packages = ["codelineage"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
