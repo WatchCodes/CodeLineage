@@ -1,12 +1,16 @@
 """Verification probes for repository mappings."""
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from typing import Any
 
 PROBE_SCHEMA_VERSION = 1
 PROBE_KIND = "verification-probe"
+# repository-mapping.schema.json requires a 40-hex SHA. Accept either case on
+# input and normalize to lowercase in the emitted record.
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -66,6 +70,8 @@ def verify_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
         errors.append("missing destination")
     if sha is None:
         errors.append("missing sha")
+    elif not _SHA_RE.match(sha):
+        errors.append(f"malformed sha (expected 40 hex characters): {sha!r}")
 
     if destination is None:
         checks["destination_exists"] = False
@@ -94,7 +100,10 @@ def verify_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
     # Backward-compatible alias; destination_exists is the canonical check.
     checks["repo_exists"] = checks.get("destination_exists", False)
 
-    fatal_errors = [e for e in errors if not e.startswith("missing source") and not e.startswith("missing sha")]
+    # Every recorded error is fatal: a probe is OK only when all inputs were
+    # present and well-formed and every check passed. Missing source/SHA used to
+    # be silently excluded here, allowing ok=True with no verifiable identity.
+    fatal_errors = errors
     record = {
         "schema_version": PROBE_SCHEMA_VERSION,
         "kind": PROBE_KIND,
