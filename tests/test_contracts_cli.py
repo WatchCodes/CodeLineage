@@ -46,6 +46,23 @@ def valid_mapping(**overrides):
     return doc
 
 
+def valid_probe(mapping, **overrides):
+    record = {
+        "schema_version": 1,
+        "kind": "verification-probe",
+        "mapping": {
+            "source": mapping["source"],
+            "destination": mapping["destination"],
+            "sha": mapping["sha"],
+        },
+        "checks": {"destination_exists": True, "repo_exists": True},
+        "errors": [],
+        "ok": True,
+    }
+    record.update(overrides)
+    return record
+
+
 def valid_migration_report(**overrides):
     doc = {
         "schema_version": 1,
@@ -207,8 +224,14 @@ def test_cli_validate_json_output_bad(tmp_path):
 def test_cli_record_and_lookup_mapping(tmp_path):
     store = tmp_path / "store.json"
     mapping = tmp_path / "mapping.json"
-    mapping.write_text(json.dumps(valid_mapping()), encoding="utf-8")
-    r = run_cli(["record", "--mapping", str(mapping), "--store", str(store)], cwd=tmp_path)
+    document = valid_mapping()
+    mapping.write_text(json.dumps(document), encoding="utf-8")
+    probe = tmp_path / "probe.json"
+    probe.write_text(json.dumps(valid_probe(document)), encoding="utf-8")
+    r = run_cli(
+        ["record", "--mapping", str(mapping), "--probe-record", str(probe), "--store", str(store)],
+        cwd=tmp_path,
+    )
     assert r.returncode == 0, r.stdout + r.stderr
     payload = json.loads(r.stdout)
     assert payload["ok"] is True
@@ -235,8 +258,14 @@ def test_cli_record_from_report(tmp_path):
 def test_cli_record_rejects_unverified(tmp_path):
     store = tmp_path / "store.json"
     mapping = tmp_path / "mapping.json"
-    mapping.write_text(json.dumps(valid_mapping(status="FAILED")), encoding="utf-8")
-    r = run_cli(["record", "--mapping", str(mapping), "--store", str(store)], cwd=tmp_path)
+    document = valid_mapping(status="FAILED")
+    mapping.write_text(json.dumps(document), encoding="utf-8")
+    probe = tmp_path / "probe.json"
+    probe.write_text(json.dumps(valid_probe(document)), encoding="utf-8")
+    r = run_cli(
+        ["record", "--mapping", str(mapping), "--probe-record", str(probe), "--store", str(store)],
+        cwd=tmp_path,
+    )
     assert r.returncode == 1
     payload = json.loads(r.stdout)
     assert payload["ok"] is False
@@ -257,11 +286,21 @@ def test_cli_record_updates_existing(tmp_path):
     store = tmp_path / "store.json"
     m1 = tmp_path / "m1.json"
     m2 = tmp_path / "m2.json"
-    m1.write_text(json.dumps(valid_mapping(verified_at="2026-11-22T00:00:00Z")), encoding="utf-8")
-    m2.write_text(json.dumps(valid_mapping(verified_at="2026-11-23T00:00:00Z")), encoding="utf-8")
-    r1 = run_cli(["record", "--mapping", str(m1), "--store", str(store)], cwd=tmp_path)
+    first = valid_mapping(verified_at="2026-11-22T00:00:00Z")
+    second = valid_mapping(verified_at="2026-11-23T00:00:00Z")
+    m1.write_text(json.dumps(first), encoding="utf-8")
+    m2.write_text(json.dumps(second), encoding="utf-8")
+    probe = tmp_path / "probe.json"
+    probe.write_text(json.dumps(valid_probe(first)), encoding="utf-8")
+    r1 = run_cli(
+        ["record", "--mapping", str(m1), "--probe-record", str(probe), "--store", str(store)],
+        cwd=tmp_path,
+    )
     assert r1.returncode == 0
-    r2 = run_cli(["record", "--mapping", str(m2), "--store", str(store)], cwd=tmp_path)
+    r2 = run_cli(
+        ["record", "--mapping", str(m2), "--probe-record", str(probe), "--store", str(store)],
+        cwd=tmp_path,
+    )
     assert r2.returncode == 0
     payload = json.loads(r2.stdout)
     assert payload["action"] == "updated"

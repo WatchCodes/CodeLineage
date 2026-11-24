@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from .contracts import ContractError, validate, validate_file
 from .lineage import build_repository_mapping
+from .probes import PROBE_KIND, PROBE_SCHEMA_VERSION
+
+# Mirrors NastechBridge: a bare status string is a claim, not evidence. All
+# six CodeFoundry checks must be true before a mapping may grant URL-rewrite
+# authority downstream.
+REQUIRED_MIGRATION_CHECKS = ("created", "named", "owned", "gated", "license_kept", "credits")
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def _emit(payload: Any) -> None:
@@ -97,6 +105,60 @@ def _upsert_mapping(store: dict[str, Any], mapping: dict[str, Any]) -> dict[str,
     return {"action": "updated" if replaced else "created", "mapping": mapping}
 
 
+def _assert_migration_report_evidence(report: dict[str, Any]) -> None:
+    """Fail closed unless the report carries positive, complete evidence."""
+    if report.get("status") not in {"VERIFIED", "GATED"}:
+        raise ContractError(f"refusing to record unverified mapping: status={report.get('status')!r}")
+    if report.get("error") is not None:
+        raise ContractError(f"refusing to record mapping from failed report: {report['error']}")
+    checks = report.get("checks")
+    if not isinstance(checks, dict):
+        raise ContractError("migration-report checks must be an object")
+    missing = [name for name in REQUIRED_MIGRATION_CHECKS if checks.get(name) is not True]
+    if missing:
+        raise ContractError("migration-report evidence incomplete: " + ",".join(missing))
+    receipt = report.get("receipt")
+    if not isinstance(receipt, dict):
+        raise ContractError("migration-report receipt must be an object")
+    sha = receipt.get("source_sha")
+    if not isinstance(sha, str) or not _SHA_RE.fullmatch(sha):
+        raise ContractError("migration-report receipt.source_sha must be a 40-hex SHA")
+
+
+def _assert_probe_evidence(probe: dict[str, Any], mapping: dict[str, Any]) -> None:
+    """Require a locally verifiable probe artifact for a directly supplied mapping.
+
+    The probe is validated as data, not executed here: recording must never
+    depend on network availability or a gh credential. Identity fields must
+    match the mapping being recorded so an unrelated probe cannot be reused.
+    """
+    if probe.get("kind") != PROBE_KIND:
+        raise ContractError(f"probe kind must be {PROBE_KIND!r}")
+    if probe.get("schema_version") != PROBE_SCHEMA_VERSION:
+        raise ContractError("probe schema_version is unsupported")
+    if probe.get("ok") is not True:
+        raise ContractError("probe did not succeed; refusing to record mapping")
+    errors = probe.get("errors")
+    if not isinstance(errors, list) or errors:
+        raise ContractError("probe has unresolved errors; refusing to record mapping")
+    checks = probe.get("checks")
+    if not isinstance(checks, dict) or not checks or not all(value is True for value in checks.values()):
+        raise ContractError("probe checks are incomplete or failed")
+    probed = probe.get("mapping")
+    if not isinstance(probed, dict):
+        raise ContractError("probe mapping must be an object")
+    for field in ("source", "destination", "sha"):
+        expected = mapping.get(field)
+        actual = probed.get(field)
+        if field == "sha":
+            if isinstance(expected, str):
+                expected = expected.lower()
+            if isinstance(actual, str):
+                actual = actual.lower()
+        if expected != actual:
+            raise ContractError(f"probe evidence identity mismatch for {field}")
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     ok, errors = validate_file(args.schema, args.file)
     payload: dict[str, Any] = {"ok": ok, "schema": args.schema, "file": args.file}
@@ -121,6 +183,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
     if args.report:
         report = _load_json_object(args.report, label="report")
         validate("migration-report", report)
+        _assert_migration_report_evidence(report)
         sha = report.get("sha")
         if not isinstance(sha, str):
             receipt = report.get("receipt")
@@ -160,6 +223,10 @@ def _cmd_record(args: argparse.Namespace) -> int:
     else:
         mapping = _load_json_object(args.mapping, label="mapping")
         validate("repository-mapping", mapping)
+        if not args.probe_record:
+            raise ContractError("recording --mapping requires --probe-record evidence")
+        probe = _load_json_object(args.probe_record, label="probe-record")
+        _assert_probe_evidence(probe, mapping)
 
     if mapping.get("status") != "VERIFIED":
         raise ContractError(
@@ -204,6 +271,11 @@ def build_parser() -> argparse.ArgumentParser:
     src = p_record.add_mutually_exclusive_group(required=True)
     src.add_argument("--report", help="Path to MigrationReport JSON file.")
     src.add_argument("--mapping", help="Path to RepositoryMapping JSON file.")
+    p_record.add_argument(
+        "--probe-record",
+        default=None,
+        help="Path to a verification-probe artifact; required with --mapping.",
+    )
     p_record.add_argument("--store", default=None, help="Path to mapping store JSON file.")
     p_record.set_defaults(func=_cmd_record)
 
