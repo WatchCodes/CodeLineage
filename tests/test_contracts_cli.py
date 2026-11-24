@@ -278,3 +278,37 @@ def test_cli_record_invalid_report_fails_closed(tmp_path):
     assert r.returncode == 1
     payload = json.loads(r.stdout)
     assert payload["ok"] is False
+
+
+def test_migration_report_accepts_every_codefoundry_checkpoint_stage():
+    stages = (
+        "start", "validate", "receipt", "scan", "license", "clone",
+        "brand", "credits", "gate", "ship", "report",
+    )
+    checkpoints = [{"stage": s, "at": "2026-11-24T00:00:00Z", "ok": True} for s in stages]
+    ok, errors = is_valid("migration-report", valid_migration_report(
+        status="REQUIRES_REVIEW",
+        receipt={
+            "idempotency_key": "b1::Owner/Repo",
+            "destination_repo_id": 1,
+            "source_sha": "a" * 40,
+            "destination_sha": "b" * 40,
+            "checkpoints": checkpoints,
+        },
+    ))
+    assert ok, errors
+
+
+def test_migration_report_still_rejects_unknown_checkpoint_stage():
+    checkpoints = [{"stage": "not_a_real_stage", "at": "2026-11-24T00:00:00Z", "ok": True}]
+    ok, errors = is_valid("migration-report", valid_migration_report(
+        receipt={
+            "idempotency_key": "b1::Owner/Repo",
+            "destination_repo_id": 1,
+            "source_sha": "a" * 40,
+            "destination_sha": "b" * 40,
+            "checkpoints": checkpoints,
+        },
+    ))
+    assert ok is False
+    assert any("not_a_real_stage" in e for e in errors)
