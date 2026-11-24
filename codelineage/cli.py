@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import re
 import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +51,23 @@ def _default_store() -> Path:
     return Path(".codelineage") / "mappings.json"
 
 
+def _store_lock_path(path: Path) -> Path:
+    return path.with_name(path.name + ".lock")
+
+
+@contextmanager
+def _store_lock(path: Path) -> Iterator[None]:
+    """Serialize the whole store read-modify-write cycle across processes."""
+    lock_path = _store_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _load_store(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"schema_version": 1, "mappings": []}
@@ -74,10 +96,20 @@ def _save_store(path: Path, store: dict[str, Any]) -> None:
         raise ContractError("store must contain schema_version=1 and mappings list")
     for mapping in store["mappings"]:
         validate("repository-mapping", mapping)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(store, indent=2, sort_keys=True) + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(store, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
     except OSError as exc:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
         raise ContractError(f"store cannot be written: {path}: {exc}") from exc
 
 
@@ -92,10 +124,15 @@ def _mapping_key(mapping: dict[str, Any]) -> tuple[str, str]:
 def _upsert_mapping(store: dict[str, Any], mapping: dict[str, Any]) -> dict[str, Any]:
     validate("repository-mapping", mapping)
     key = _mapping_key(mapping)
+    incoming_at = str(mapping.get("verified_at", ""))
     mappings = store.setdefault("mappings", [])
     replaced = False
     for idx, existing in enumerate(mappings):
         if _mapping_key(existing) == key:
+            if str(existing.get("verified_at", "")) > incoming_at:
+                raise ContractError(
+                    f"refusing to supersede newer mapping for {key[0]} -> {key[1]} with older evidence"
+                )
             mappings[idx] = mapping
             replaced = True
             break
@@ -233,9 +270,10 @@ def _cmd_record(args: argparse.Namespace) -> int:
             f"refusing to record unverified mapping: status={mapping.get('status')!r}"
         )
 
-    store = _load_store(store_path)
-    result = _upsert_mapping(store, mapping)
-    _save_store(store_path, store)
+    with _store_lock(store_path):
+        store = _load_store(store_path)
+        result = _upsert_mapping(store, mapping)
+        _save_store(store_path, store)
     _emit({"ok": True, "store": str(store_path), **result})
     return 0
 
