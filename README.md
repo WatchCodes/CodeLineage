@@ -35,7 +35,13 @@ gate.
 
 - Never creates, brands, verifies or publishes a repository.
 - Never records a mapping it has not verified.
-- Never deletes history. A superseded mapping is marked superseded, not removed.
+- Never deletes history. A superseded mapping is marked with `superseded_by`, not removed.
+
+Recording a newer mapping for a source marks its active predecessor(s) as
+superseded and appends the new record; replaying an identical record is a no-op.
+`codelineage lookup` returns only active mappings (one per source) so a stale
+record can never grant URL-rewrite authority. Use `--include-superseded` for
+audits and history inspection.
 
 ## Contracts
 

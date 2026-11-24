@@ -305,8 +305,12 @@ def test_cli_record_updates_existing(tmp_path):
     payload = json.loads(r2.stdout)
     assert payload["action"] == "updated"
     store_doc = json.loads(store.read_text(encoding="utf-8"))
-    assert len(store_doc["mappings"]) == 1
-    assert store_doc["mappings"][0]["verified_at"] == "2026-11-23T00:00:00Z"
+    # Supersession is append-only: old evidence is marked, never deleted.
+    assert len(store_doc["mappings"]) == 2
+    old = next(m for m in store_doc["mappings"] if m["verified_at"] == first["verified_at"])
+    assert old["superseded_by"] == second["destination"]
+    active = next(m for m in store_doc["mappings"] if "superseded_by" not in m)
+    assert active["verified_at"] == "2026-11-23T00:00:00Z"
 
 
 def test_cli_record_invalid_report_fails_closed(tmp_path):

@@ -122,24 +122,44 @@ def _mapping_key(mapping: dict[str, Any]) -> tuple[str, str]:
 
 
 def _upsert_mapping(store: dict[str, Any], mapping: dict[str, Any]) -> dict[str, Any]:
+    """Append a mapping, marking prior evidence superseded instead of deleting it.
+
+    Supersession is by source: only one mapping per source is active, so a URL
+    rewrite authority can never be granted by an older or duplicate record.
+    Idempotent replay of the exact same mapping leaves the store unchanged.
+    """
     validate("repository-mapping", mapping)
-    key = _mapping_key(mapping)
+    _mapping_key(mapping)  # fail closed on malformed source/destination
     incoming_at = str(mapping.get("verified_at", ""))
     mappings = store.setdefault("mappings", [])
-    replaced = False
-    for idx, existing in enumerate(mappings):
-        if _mapping_key(existing) == key:
-            if str(existing.get("verified_at", "")) > incoming_at:
-                raise ContractError(
-                    f"refusing to supersede newer mapping for {key[0]} -> {key[1]} with older evidence"
-                )
-            mappings[idx] = mapping
-            replaced = True
-            break
-    if not replaced:
-        mappings.append(mapping)
-    mappings.sort(key=lambda m: (str(m.get("source", "")), str(m.get("destination", ""))))
-    return {"action": "updated" if replaced else "created", "mapping": mapping}
+    source = mapping["source"]
+    same_source = [m for m in mappings if m.get("source") == source]
+
+    if any(m == mapping for m in same_source):
+        return {"action": "unchanged", "mapping": mapping, "superseded": []}
+
+    newest_at = max((str(m.get("verified_at", "")) for m in same_source), default="")
+    if newest_at > incoming_at:
+        raise ContractError(
+            f"refusing to supersede newer mapping for {source} with older evidence"
+        )
+
+    active = [m for m in same_source if "superseded_by" not in m]
+    for old in active:
+        old["superseded_by"] = mapping["destination"]
+    mappings.append(mapping)
+    mappings.sort(
+        key=lambda m: (
+            str(m.get("source", "")),
+            str(m.get("destination", "")),
+            str(m.get("verified_at", "")),
+        )
+    )
+    return {
+        "action": "updated" if active else "created",
+        "mapping": mapping,
+        "superseded": [m["destination"] for m in active],
+    }
 
 
 def _assert_migration_report_evidence(report: dict[str, Any]) -> None:
@@ -285,12 +305,20 @@ def _cmd_lookup(args: argparse.Namespace) -> int:
     store = _load_store(store_path)
     matches = []
     for mapping in store.get("mappings", []):
+        if not args.include_superseded and "superseded_by" in mapping:
+            continue
         if args.source and mapping.get("source") != args.source:
             continue
         if args.destination and mapping.get("destination") != args.destination:
             continue
         matches.append(mapping)
-    payload = {"ok": bool(matches), "store": str(store_path), "count": len(matches), "mappings": matches}
+    payload = {
+        "ok": bool(matches),
+        "store": str(store_path),
+        "count": len(matches),
+        "include_superseded": bool(args.include_superseded),
+        "mappings": matches,
+    }
     _emit(payload)
     return 0 if matches else 1
 
@@ -321,6 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_lookup.add_argument("--store", default=None, help="Path to mapping store JSON file.")
     p_lookup.add_argument("--source", default=None, help="Source repository to match.")
     p_lookup.add_argument("--destination", default=None, help="Destination repository to match.")
+    p_lookup.add_argument(
+        "--include-superseded",
+        action="store_true",
+        default=False,
+        help="Audit only: include superseded mappings in lookup results.",
+    )
     p_lookup.set_defaults(func=_cmd_lookup)
 
     return parser
